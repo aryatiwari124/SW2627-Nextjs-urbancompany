@@ -1,64 +1,576 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 
-const dates = [
-	{ day: "Today", date: "26", month: "Aug" },
-	{ day: "Thu", date: "27", month: "Aug" },
-	{ day: "Fri", date: "28", month: "Aug" },
-	{ day: "Sat", date: "29", month: "Aug" },
-	{ day: "Sun", date: "30", month: "Aug" },
+interface Customer {
+	id: number;
+	name: string;
+	phone: string | null;
+	email: string;
+	address: string | null;
+}
+
+interface Booking {
+	id: number;
+	service: string;
+	professionalId: number;
+	professional: string;
+	bookingDate: string;
+	status: string;
+}
+
+interface CustomerResponse {
+	customer: Customer;
+	bookings: Booking[];
+}
+
+interface Slot {
+	time: string;
+	start: string;
+	end: string;
+	status: "OPEN" | "BOOKED" | "HELD";
+	booking?: {
+		id?: number;
+		service?: string;
+		status?: string;
+	};
+}
+
+interface CalendarResponse {
+	professional: {
+		id: number;
+		name: string;
+		phone: string | null;
+	};
+	date: string;
+	slots: Slot[];
+	availableSlots: Slot[];
+	bookedSlots: Slot[];
+}
+
+const defaultDates = [
+	{ day: "Today", date: "26", month: "Aug", fullDate: "2026-08-26" },
+	{ day: "Thu", date: "27", month: "Aug", fullDate: "2026-08-27" },
+	{ day: "Fri", date: "28", month: "Aug", fullDate: "2026-08-28" },
+	{ day: "Sat", date: "29", month: "Aug", fullDate: "2026-08-29" },
+	{ day: "Sun", date: "30", month: "Aug", fullDate: "2026-08-30" },
 ];
 
-const times = ["09:00 AM", "11:30 AM", "02:00 PM", "04:30 PM", "07:00 PM"];
-
 export default function CustomerPage() {
-	const [selectedDate, setSelectedDate] = useState("26");
-	const [selectedTime, setSelectedTime] = useState("02:00 PM");
-	const [confirmed, setConfirmed] = useState(false);
+	const router = useRouter();
+	const [checkingAuth, setCheckingAuth] = useState(true);
+
+	// Customer data
+	const [customerData, setCustomerData] = useState<CustomerResponse | null>(null);
+	const [loadingCustomer, setLoadingCustomer] = useState(true);
+	const [customerError, setCustomerError] = useState("");
+
+	// Selected re-booking target
+	const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+
+	// Date and time slot selection
+	const [selectedDateObj, setSelectedDateObj] = useState(defaultDates[0]);
+	const [slots, setSlots] = useState<Slot[]>([]);
+	const [selectedTime, setSelectedTime] = useState<string>("");
+	const [loadingSlots, setLoadingSlots] = useState(false);
+
+	// Submission state
+	const [submitting, setSubmitting] = useState(false);
+	const [rebookSuccess, setRebookSuccess] = useState<string | null>(null);
+	const [rebookError, setRebookError] = useState<string | null>(null);
+
+	// Fetch customer profile & booking history
+	const fetchCustomerData = useCallback(async () => {
+		try {
+			setLoadingCustomer(true);
+			setCustomerError("");
+			const res = await fetch(`/api/customer`);
+			if (res.status === 401) {
+				router.push("/login?redirect=/customer");
+				return;
+			}
+			if (res.status === 403) {
+				router.push("/professional");
+				return;
+			}
+			if (!res.ok) {
+				const errBody = await res.json().catch(() => ({}));
+				throw new Error(errBody.error || `Failed to fetch customer (HTTP ${res.status})`);
+			}
+			const data: CustomerResponse = await res.json();
+			setCustomerData(data);
+
+			// Automatically select the first completed booking for rebooking if none selected
+			const completed = data.bookings.find((b) => b.status === "COMPLETED");
+			if (completed) {
+				setSelectedBooking((prev) => prev ?? completed);
+			}
+		} catch (err: unknown) {
+			setCustomerError(err instanceof Error ? err.message : "Failed to load customer profile.");
+		} finally {
+			setLoadingCustomer(false);
+		}
+	}, [router]);
+
+	// Check auth state on mount
+	useEffect(() => {
+		async function checkAuth() {
+			try {
+				const res = await fetch("/api/auth/me");
+				if (res.status === 401) {
+					router.push("/login?redirect=/customer");
+					return;
+				}
+				const data = await res.json();
+				if (data.user?.role === "PROFESSIONAL") {
+					router.push("/professional");
+					return;
+				}
+				setCheckingAuth(false);
+				fetchCustomerData();
+			} catch {
+				router.push("/login?redirect=/customer");
+			}
+		}
+		checkAuth();
+	}, [router, fetchCustomerData]);
+
+	const handleLogout = async () => {
+		try {
+			await fetch("/api/auth/logout", { method: "POST" });
+			router.push("/login");
+		} catch {
+			router.push("/login");
+		}
+	};
+
+	// Fetch professional availability when target booking or date changes
+	const fetchCalendarSlots = useCallback(async (proId: number, dateStr: string) => {
+		try {
+			setLoadingSlots(true);
+			const res = await fetch(`/api/professionals/${proId}/calendar?date=${dateStr}`);
+			if (!res.ok) {
+				const errBody = await res.json().catch(() => ({}));
+				throw new Error(errBody.error || `Failed to fetch calendar (HTTP ${res.status})`);
+			}
+			const calData: CalendarResponse = await res.json();
+			setSlots(calData.slots);
+
+			// Pick first available slot if currently selected slot is not open
+			const openSlots = calData.slots.filter((s) => s.status === "OPEN");
+			setSelectedTime((prev) => {
+				const isCurrentOpen = openSlots.some((s) => s.time === prev);
+				if (isCurrentOpen) return prev;
+				return openSlots.length > 0 ? openSlots[0].time : "";
+			});
+		} catch {
+			setSlots([]);
+			setSelectedTime("");
+		} finally {
+			setLoadingSlots(false);
+		}
+	}, []);
+
+	useEffect(() => {
+		if (selectedBooking) {
+			fetchCalendarSlots(selectedBooking.professionalId, selectedDateObj.fullDate);
+		}
+	}, [selectedBooking, selectedDateObj, fetchCalendarSlots]);
+
+	// Handle re-booking submission
+	const handleRebook = async () => {
+		if (!selectedBooking) {
+			setRebookError("Please select a past completed booking to re-book.");
+			return;
+		}
+		if (!selectedTime) {
+			setRebookError("Please select an available time slot.");
+			return;
+		}
+
+		try {
+			setSubmitting(true);
+			setRebookError(null);
+			setRebookSuccess(null);
+
+			const res = await fetch(`/api/bookings/${selectedBooking.id}/rebook`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					date: selectedDateObj.fullDate,
+					time: selectedTime,
+				}),
+			});
+
+			const data = await res.json();
+
+			if (res.status === 201) {
+				setRebookSuccess(
+					`Booking confirmed! ${selectedBooking.service} with ${selectedBooking.professional} on ${selectedDateObj.date} ${selectedDateObj.month} at ${selectedTime}.`
+				);
+				await fetchCalendarSlots(selectedBooking.professionalId, selectedDateObj.fullDate);
+				await fetchCustomerData();
+			} else if (res.status === 409) {
+				setRebookError(data.error || "That time slot is no longer available. Please select another open slot.");
+				await fetchCalendarSlots(selectedBooking.professionalId, selectedDateObj.fullDate);
+			} else if (res.status === 404) {
+				setRebookError("Booking record not found. Please refresh your past bookings.");
+			} else if (res.status === 403) {
+				setRebookError("You do not have permission to re-book this appointment.");
+			} else if (res.status === 400) {
+				setRebookError(data.error || "Invalid booking details provided.");
+			} else {
+				setRebookError(data.error || `Failed to re-book appointment (HTTP ${res.status})`);
+			}
+		} catch (err: unknown) {
+			setRebookError(err instanceof Error ? err.message : "Network error while submitting booking.");
+		} finally {
+			setSubmitting(false);
+		}
+	};
+
+	if ((checkingAuth || loadingCustomer) && !customerData) {
+		return (
+			<main className="uc-page">
+				<nav className="uc-topbar">
+					<Link className="uc-brand" href="/customer" aria-label="Urban Company home">
+						<span className="uc-brand-mark">U</span><span>urban company</span>
+					</Link>
+				</nav>
+				<section className="uc-container">
+					<div className="uc-hero">
+						<div>
+							<p className="uc-eyebrow">Loading dashboard</p>
+							<h1 className="uc-hero-title">Preparing your <em>account</em>...</h1>
+							<div className="uc-skeleton uc-skeleton-text" style={{ width: 280, height: 16 }} />
+						</div>
+					</div>
+					<div className="uc-two-col">
+						<div>
+							<div className="uc-skeleton" style={{ height: 140, marginBottom: 16 }} />
+							<div className="uc-skeleton" style={{ height: 260 }} />
+						</div>
+						<div>
+							<div className="uc-skeleton" style={{ height: 100, marginBottom: 12 }} />
+							<div className="uc-skeleton" style={{ height: 100, marginBottom: 12 }} />
+							<div className="uc-skeleton" style={{ height: 100 }} />
+						</div>
+					</div>
+				</section>
+			</main>
+		);
+	}
+
+	if (customerError && !customerData) {
+		return (
+			<main className="uc-page">
+				<nav className="uc-topbar">
+					<Link className="uc-brand" href="/customer" aria-label="Urban Company home">
+						<span className="uc-brand-mark">U</span><span>urban company</span>
+					</Link>
+				</nav>
+				<section className="uc-container">
+					<div className="uc-hero">
+						<div>
+							<p className="uc-eyebrow">Error</p>
+							<h1 className="uc-hero-title">Unable to load dashboard<span>.</span></h1>
+							<p className="uc-hero-copy">{customerError}</p>
+							<button className="uc-btn-outline" onClick={() => fetchCustomerData()} style={{ marginTop: 16 }}>
+								Retry
+							</button>
+						</div>
+					</div>
+				</section>
+			</main>
+		);
+	}
+
+	const customer = customerData?.customer;
+	const bookings = customerData?.bookings || [];
+	const customerInitials = customer?.name
+		? customer.name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()
+		: "UC";
+	const customerFirstName = customer?.name ? customer.name.split(" ")[0] : "Customer";
 
 	return (
-		<main className="page-shell">
-			<nav className="topbar">
-				<a className="brand" href="/customer" aria-label="Urban Company home"><span className="brand-mark">U</span><span>urban company</span></a>
-				<div className="nav-actions"><button className="location" type="button" aria-label="Change location"><span aria-hidden="true">⌖</span> Bengaluru <span className="chevron">⌄</span></button><button className="profile-button" type="button" aria-label="Open profile">AK</button></div>
+		<main className="uc-page">
+			<nav className="uc-topbar">
+				<Link className="uc-brand" href="/customer" aria-label="Urban Company home">
+					<span className="uc-brand-mark">U</span><span>urban company</span>
+				</Link>
+				<div className="uc-nav-actions">
+					<span className="uc-location-tag">
+						<span style={{ color: "var(--uc-coral)", marginRight: 4 }}>⌖</span> Bengaluru
+					</span>
+					<div className="uc-avatar-btn" title={`${customer?.name} (${customer?.email})`}>
+						{customerInitials}
+					</div>
+					<button
+						onClick={handleLogout}
+						type="button"
+						className="uc-logout-btn"
+					>
+						Sign out
+					</button>
+				</div>
 			</nav>
 
-			<section className="welcome-section">
-				<div><p className="eyebrow">YOUR HOME, TAKEN CARE OF</p><h1>Good morning, Ananya<span>.</span></h1><p className="welcome-copy">Pick up where you left off. Your trusted professionals are ready when you are.</p></div>
-				<div className="trust-note"><span className="status-dot" /> 2 professionals available today</div>
-			</section>
-
-			<section className="rebook-layout">
-				<div className="primary-column">
-					<div className="section-heading"><div><p className="eyebrow">QUICKREBOOK</p><h2>Book your usual service</h2></div><span className="step-label">01 <span>/ 02</span></span></div>
-					<article className="service-card"><div className="service-icon" aria-hidden="true">✦</div><div className="service-details"><div className="service-topline"><span className="service-category">Home cleaning</span><span className="past-label">PAST SERVICE</span></div><h3>Full home deep cleaning</h3><p>With <strong>Priya S.</strong> <span className="verified">✓</span> <span className="rating">★ 4.9</span></p><div className="service-meta"><span>⌂ Indiranagar, Bengaluru</span><span>◷ 3 hrs</span></div></div><span className="repeat-badge">4 bookings</span></article>
-					<div className="booking-panel"><div className="panel-header"><div><h3>Choose a time</h3><p>Priya&apos;s next available slots</p></div><span className="live-pill"><span /> LIVE</span></div><div className="date-row" role="group" aria-label="Select a date">{dates.map((date) => <button key={date.date} className={`date-option ${selectedDate === date.date ? "selected" : ""}`} onClick={() => { setSelectedDate(date.date); setConfirmed(false); }} type="button"><span>{date.day}</span><strong>{date.date}</strong><small>{date.month}</small></button>)}</div><div className="time-grid" role="group" aria-label="Select a time">{times.map((time, index) => <button key={time} className={`time-option ${selectedTime === time ? "selected" : ""} ${index === 0 ? "unavailable" : ""}`} onClick={() => { if (index !== 0) { setSelectedTime(time); setConfirmed(false); } }} disabled={index === 0} type="button">{time}{index === 0 && <small>Booked</small>}</button>)}</div><div className="address-row"><span className="address-icon">⌂</span><div><small>Service address</small><p>28, 2nd Cross, Indiranagar, Bengaluru</p></div><button type="button">Change</button></div></div>
-					<button className="confirm-button" type="button" onClick={() => setConfirmed(true)}>{confirmed ? "Slot reserved" : `Continue with ${selectedTime}`} <span aria-hidden="true">→</span></button>{confirmed && <p className="confirmation-message" role="status">Your slot is held for 10 minutes. Continue to payment to confirm.</p>}
+			<section className="uc-container">
+				<div className="uc-hero">
+					<div>
+						<p className="uc-eyebrow">Your home, taken care of</p>
+						<h1 className="uc-hero-title">Good morning, {customerFirstName}<span>.</span></h1>
+						<p className="uc-hero-copy">Pick up where you left off. Your trusted professionals are ready when you are.</p>
+					</div>
+					<div className="uc-trust-note">
+						<span className="uc-live-dot" /> Verified professionals available
+					</div>
 				</div>
 
-				<aside className="side-column"><div className="side-heading"><h2>Recent bookings</h2><button type="button">View all <span aria-hidden="true">→</span></button></div><article className="history-card current"><div className="history-icon cleaning">✦</div><div><span className="history-status upcoming">UPCOMING</span><h3>AC service &amp; repair</h3><p>Tomorrow, 10:30 AM</p><strong>Rahul K. <span className="rating">★ 4.8</span></strong></div><span className="arrow" aria-hidden="true">→</span></article><article className="history-card"><div className="history-icon blue">✧</div><div><span className="history-status">COMPLETED</span><h3>Full home deep cleaning</h3><p>12 Aug 2026</p><strong>Priya S. <span className="rating">★ 4.9</span></strong></div><span className="arrow" aria-hidden="true">→</span></article><article className="history-card"><div className="history-icon amber">⌁</div><div><span className="history-status">COMPLETED</span><h3>Bathroom cleaning</h3><p>04 Jul 2026</p><strong>Priya S. <span className="rating">★ 4.9</span></strong></div><span className="arrow" aria-hidden="true">→</span></article><div className="help-banner"><span className="help-icon">?</span><div><strong>Need something else?</strong><p>Explore 50+ home services</p></div><span aria-hidden="true">↗</span></div></aside>
-			</section>
-			<footer><span>QuickRebook</span><span>Trusted home services, made simple.</span><span>© 2026 Urban Company</span></footer>
+				<div className="uc-two-col">
+					<div>
+						<div className="uc-section-heading">
+							<div>
+								<p className="uc-eyebrow">QuickRebook</p>
+								<h2 className="uc-section-title">{selectedBooking ? `Rebook ${selectedBooking.service}` : "Book your usual service"}</h2>
+							</div>
+							<span className="uc-step-label">01 <span className="uc-step-sub">/ 02</span></span>
+						</div>
 
-			<style jsx>{`
-				@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600&display=swap');
-				:global(*) { box-sizing: border-box; } :global(body) { margin: 0; background: #f4f5f1; color: #183b35; font-family: 'DM Sans', sans-serif; } button { font: inherit; cursor: pointer; }
-				.page-shell { min-height: 100vh; overflow: hidden; background: radial-gradient(circle at 77% 2%, #e4eee6 0, transparent 27%), #f4f5f1; } .topbar { height: 76px; padding: 0 clamp(24px, 7vw, 108px); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dfe5df; background: rgba(248,249,246,.76); } .brand { display: flex; gap: 10px; align-items: center; color: #183b35; text-decoration: none; font-weight: 700; letter-spacing: -.4px; } .brand-mark { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; background: #ed5b3b; color: white; font-family: Georgia, serif; font-size: 18px; } .nav-actions { display: flex; gap: 25px; align-items: center; } .location { border: 0; background: transparent; color: #3f5951; font-size: 13px; } .location span:first-child { color: #e55d3d; font-size: 20px; vertical-align: -2px; } .chevron { margin-left: 6px; font-size: 16px; } .profile-button { width: 34px; height: 34px; border: 0; border-radius: 50%; background: #dce9df; color: #245249; font-size: 11px; font-weight: 700; }
-				.welcome-section, .rebook-layout { width: min(1170px, calc(100% - 48px)); margin: auto; } .welcome-section { padding: 67px 0 48px; display: flex; align-items: end; justify-content: space-between; } .eyebrow { margin: 0 0 14px; color: #ed6849; font-size: 10px; font-weight: 700; letter-spacing: 2px; } h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 12px; font-family: 'Playfair Display', Georgia, serif; font-size: clamp(38px, 5vw, 59px); line-height: 1.06; letter-spacing: -.8px; font-weight: 600; } h1 span { color: #ed6849; } .welcome-copy { margin: 0; color: #718079; font-size: 14px; } .trust-note { padding-bottom: 4px; color: #557067; font-size: 12px; } .status-dot, .live-pill span { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #55a874; }
-				.rebook-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, .9fr); gap: 54px; padding-bottom: 80px; } .section-heading, .side-heading, .panel-header { display: flex; justify-content: space-between; align-items: start; } h2 { margin-bottom: 22px; font-size: 23px; letter-spacing: -.5px; } .step-label { color: #ed6849; font-size: 11px; font-weight: 700; } .step-label span { color: #a4b2aa; font-weight: 400; }
-				.service-card, .booking-panel, .history-card { border: 1px solid #e0e7e0; background: rgba(255,255,255,.75); } .service-card { position: relative; display: flex; gap: 17px; align-items: center; min-height: 140px; padding: 23px 28px; border-radius: 3px; } .service-icon, .history-icon { display: grid; flex: 0 0 auto; place-items: center; background: #e7f0e7; color: #ea6848; } .service-icon { width: 57px; height: 57px; border-radius: 16px; font-size: 27px; } .service-details { flex: 1; } .service-topline { display: flex; gap: 12px; align-items: center; } .service-category { color: #718079; font-size: 11px; } .past-label, .history-status { color: #9ca9a1; font-size: 9px; font-weight: 700; letter-spacing: 1.1px; } .service-details h3 { margin: 6px 0; font-size: 17px; } .service-details p, .service-meta { margin-bottom: 0; color: #73817a; font-size: 12px; } .verified { color: #53a878; } .rating { color: #e58b36; margin-left: 6px; font-size: 11px; } .service-meta { display: flex; gap: 18px; margin-top: 14px; } .repeat-badge { align-self: start; padding: 6px 9px; border-radius: 20px; background: #fdf0e8; color: #d26a48; font-size: 10px; font-weight: 600; }
-				.booking-panel { margin-top: 14px; padding: 25px 28px 26px; border-radius: 3px; } .panel-header h3 { margin: 0 0 5px; font-size: 16px; } .panel-header p { margin: 0; color: #8a9790; font-size: 12px; } .live-pill { color: #55a874; font-size: 9px; font-weight: 700; letter-spacing: 1px; } .live-pill span { width: 6px; height: 6px; margin-right: 5px; }
-				.date-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; margin: 23px 0 15px; } .date-option, .time-option { border: 1px solid #e0e7e0; background: #fbfcfa; color: #6d7d75; } .date-option { display: flex; min-height: 72px; padding: 9px 5px; flex-direction: column; align-items: center; justify-content: center; border-radius: 3px; } .date-option span, .date-option small { font-size: 10px; } .date-option strong { margin: 4px 0 2px; color: #31564d; font-size: 19px; } .date-option.selected { border-color: #ee6848; background: #fff1eb; } .date-option.selected strong, .date-option.selected span { color: #e15f40; }
-				.time-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; } .time-option { min-height: 42px; border-radius: 3px; color: #476259; font-size: 11px; } .time-option.selected { border-color: #285b51; background: #285b51; color: #fff; } .time-option.unavailable { color: #b9c0b9; background: #f6f7f4; text-decoration: line-through; cursor: not-allowed; } .time-option small { display: block; margin-top: 2px; font-size: 8px; text-decoration: none; }
-				.address-row { display: flex; gap: 12px; align-items: center; margin-top: 25px; padding-top: 20px; border-top: 1px solid #e5eae4; } .address-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: #fce9df; color: #ed6849; } .address-row div { flex: 1; } .address-row small { color: #98a49d; font-size: 10px; } .address-row p { margin: 3px 0 0; color: #526a61; font-size: 11px; } .address-row button, .side-heading button { border: 0; background: transparent; color: #e36345; font-size: 11px; font-weight: 600; }
-				.confirm-button { display: flex; justify-content: space-between; align-items: center; width: 100%; margin-top: 14px; padding: 16px 21px; border: 0; border-radius: 3px; background: #eb6848; color: white; font-size: 13px; font-weight: 600; transition: background .2s; } .confirm-button:hover { background: #d95336; } .confirm-button span { font-size: 20px; } .confirmation-message { margin: 10px 0 0; color: #39735d; font-size: 11px; }
-				.side-heading { align-items: center; } .side-heading h2 { margin-bottom: 22px; } .history-card { position: relative; display: flex; gap: 13px; align-items: center; min-height: 98px; margin-bottom: 9px; padding: 16px; border-radius: 3px; } .history-card.current { border-left: 3px solid #ed6849; } .history-icon { width: 39px; height: 39px; border-radius: 11px; font-size: 19px; } .history-icon.blue { background: #e5eff0; color: #5596a0; } .history-icon.amber { background: #fcf0dc; color: #db9840; } .history-status.upcoming { color: #e46648; } .history-card h3 { margin: 5px 0; font-size: 13px; } .history-card p, .history-card strong { margin: 0; color: #87958d; font-size: 10px; font-weight: 400; } .history-card strong { display: block; margin-top: 7px; color: #536b62; } .history-card strong .rating { font-weight: 400; } .arrow { margin-left: auto; color: #a2afa8; font-size: 17px; } .help-banner { display: flex; gap: 11px; align-items: center; margin-top: 21px; padding: 17px 15px; border: 1px dashed #bbc9bd; color: #557067; } .help-icon { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid #ed6849; border-radius: 50%; color: #ed6849; font-weight: 700; } .help-banner div { flex: 1; } .help-banner strong { font-size: 11px; } .help-banner p { margin: 3px 0 0; color: #94a098; font-size: 10px; } .help-banner > span:last-child { color: #ed6849; }
-				footer { display: flex; justify-content: space-between; padding: 22px clamp(24px, 7vw, 108px); border-top: 1px solid #dfe5df; color: #98a49d; font-size: 10px; } footer span:first-child { color: #59736a; font-weight: 700; }
-				@media (max-width: 760px) { .welcome-section { padding-top: 45px; flex-direction: column; align-items: start; gap: 23px; } .rebook-layout { display: block; } .side-column { margin-top: 54px; } .time-grid { grid-template-columns: repeat(3, 1fr); } .service-card { padding: 18px; } .repeat-badge { display: none; } footer { gap: 10px; flex-wrap: wrap; } footer span:last-child { width: 100%; } }
-				@media (max-width: 430px) { .topbar { padding: 0 20px; } .location { display: none; } .welcome-section, .rebook-layout { width: calc(100% - 40px); } .booking-panel { padding: 20px 15px; } .service-meta { flex-direction: column; gap: 5px; } .date-row { gap: 5px; } .date-option { min-height: 65px; } }
-			`}</style>
+						{selectedBooking ? (
+							<article className="uc-service-card">
+								<div className="uc-service-icon" aria-hidden="true">✦</div>
+								<div className="uc-service-details">
+									<div className="uc-service-topline">
+										<span className="uc-service-category">Re-booking</span>
+										<span className="uc-status-chip completed">PAST SERVICE #{selectedBooking.id}</span>
+									</div>
+									<h3 className="uc-service-title">{selectedBooking.service}</h3>
+									<p style={{ margin: 0, color: "var(--uc-text-secondary)", fontSize: 12 }}>
+										With <strong>{selectedBooking.professional}</strong>{" "}
+										<span className="uc-verified">✓</span> <span className="uc-rating">★ 4.9</span>
+									</p>
+									<div className="uc-service-meta">
+										<span>⌂ {customer?.address || "Registered Address"}</span>
+										<span>◷ 2.5 hrs</span>
+									</div>
+								</div>
+								<span className="uc-repeat-badge">Trusted Pro</span>
+							</article>
+						) : (
+							<article className="uc-service-card">
+								<div className="uc-service-icon" aria-hidden="true">✦</div>
+								<div className="uc-service-details">
+									<h3 className="uc-service-title">No completed booking selected</h3>
+									<p style={{ margin: 0, color: "var(--uc-text-secondary)", fontSize: 12 }}>
+										Select a completed service from your history on the right to re-book.
+									</p>
+								</div>
+							</article>
+						)}
+
+						<div className="uc-booking-panel">
+							<div className="uc-panel-header">
+								<div>
+									<h3 className="uc-panel-title">Choose a time</h3>
+									<p className="uc-panel-sub">
+										{selectedBooking ? `${selectedBooking.professional}'s live availability` : "Select a time slot"}
+									</p>
+								</div>
+								<span className="uc-live-pill"><span className="uc-live-dot" /> LIVE</span>
+							</div>
+
+							{/* Date selection row */}
+							<div className="uc-date-row" role="group" aria-label="Select a date">
+								{defaultDates.map((dateItem) => (
+									<button
+										key={dateItem.fullDate}
+										className={`uc-date-btn${selectedDateObj.fullDate === dateItem.fullDate ? " selected" : ""}`}
+										onClick={() => {
+											setSelectedDateObj(dateItem);
+											setRebookSuccess(null);
+											setRebookError(null);
+										}}
+										type="button"
+									>
+										<span>{dateItem.day}</span>
+										<strong>{dateItem.date}</strong>
+										<small>{dateItem.month}</small>
+									</button>
+								))}
+							</div>
+
+							{/* Time grid */}
+							{loadingSlots ? (
+								<div style={{ padding: "20px 0", textAlign: "center", color: "var(--uc-text-secondary)", fontSize: 13 }}>
+									Checking professional availability...
+								</div>
+							) : slots.length === 0 ? (
+								<div style={{ padding: "20px 0", textAlign: "center", color: "var(--uc-text-secondary)", fontSize: 13 }}>
+									No slots available for this date.
+								</div>
+							) : (
+								<div className="uc-time-grid" role="group" aria-label="Select a time">
+									{slots.map((slot) => {
+										const isBooked = slot.status !== "OPEN";
+										const isSelected = selectedTime === slot.time;
+										return (
+											<button
+												key={slot.time}
+												className={`uc-time-btn${isSelected ? " selected" : ""}${isBooked ? " unavailable" : ""}`}
+												onClick={() => {
+													if (!isBooked) {
+														setSelectedTime(slot.time);
+														setRebookSuccess(null);
+														setRebookError(null);
+													}
+												}}
+												disabled={isBooked}
+												type="button"
+											>
+												{slot.time}
+												{isBooked && <small>{slot.status === "HELD" ? "Held" : "Booked"}</small>}
+											</button>
+										);
+									})}
+								</div>
+							)}
+
+							<div className="uc-address-row">
+								<span className="uc-address-icon">⌂</span>
+								<div>
+									<small>Service address</small>
+									<p>{customer?.address || "No address on file"}</p>
+								</div>
+								<button type="button" className="uc-btn-ghost">Change</button>
+							</div>
+						</div>
+
+						{/* Feedback banners */}
+						{rebookError && (
+							<div className="uc-banner uc-banner-error" role="alert">
+								<strong>⚠ Error:</strong> {rebookError}
+							</div>
+						)}
+
+						{rebookSuccess && (
+							<div className="uc-banner uc-banner-success" role="status">
+								<strong>✓ Success:</strong> {rebookSuccess}
+							</div>
+						)}
+
+						<div style={{ marginTop: 14 }}>
+							<button
+								className="uc-btn-primary"
+								type="button"
+								onClick={handleRebook}
+								disabled={submitting || !selectedBooking || !selectedTime}
+							>
+								<span>
+									{submitting
+										? "Confirming booking..."
+										: rebookSuccess
+										? "Book Another Slot"
+										: selectedTime
+										? `Continue with ${selectedTime}`
+										: "Select a time slot"}
+								</span>
+								<span className="btn-arrow" aria-hidden="true">→</span>
+							</button>
+						</div>
+					</div>
+
+					<aside>
+						<div className="uc-side-heading">
+							<h2 className="uc-section-title">Recent bookings</h2>
+							<button type="button" className="uc-btn-secondary" onClick={() => fetchCustomerData()}>
+								Refresh
+							</button>
+						</div>
+
+						{bookings.length === 0 ? (
+							<div className="uc-empty-state">
+								No past bookings found.
+							</div>
+						) : (
+							bookings.map((booking, idx) => {
+								const isCompleted = booking.status === "COMPLETED";
+								const isSelected = selectedBooking?.id === booking.id;
+								const iconTheme = idx % 3 === 0 ? "" : idx % 3 === 1 ? "blue" : "amber";
+
+								const formattedDate = new Date(booking.bookingDate).toLocaleDateString("en-IN", {
+									day: "2-digit",
+									month: "short",
+									year: "numeric",
+									timeZone: "Asia/Kolkata",
+								});
+
+								const statusClass = booking.status === "COMPLETED"
+									? "completed"
+									: booking.status === "CONFIRMED"
+									? "confirmed"
+									: booking.status === "HELD"
+									? "held"
+									: "cancelled";
+
+								return (
+									<article
+										key={booking.id}
+										className={`uc-history-card${isSelected ? " selected" : ""}`}
+									>
+										<div className={`uc-history-icon ${iconTheme}`}>
+											{idx % 3 === 0 ? "✦" : idx % 3 === 1 ? "✧" : "⌁"}
+										</div>
+										<div className="uc-history-body">
+											<span className={`uc-status-chip ${statusClass}`}>
+												{booking.status}
+											</span>
+											<h3 className="uc-history-title">{booking.service}</h3>
+											<p className="uc-history-meta">{formattedDate}</p>
+											<strong className="uc-history-prof">
+												{booking.professional} <span className="uc-rating">★ 4.9</span>
+											</strong>
+											{isCompleted && (
+												<div style={{ marginTop: 8 }}>
+													<button
+														type="button"
+														className={`uc-btn-outline${isSelected ? " active" : ""}`}
+														onClick={() => {
+															setSelectedBooking(booking);
+															setRebookSuccess(null);
+															setRebookError(null);
+														}}
+													>
+														{isSelected ? "Selected for Rebook" : "Book Again ↻"}
+													</button>
+												</div>
+											)}
+										</div>
+										<span className="uc-card-arrow" aria-hidden="true">→</span>
+									</article>
+								);
+							})
+						)}
+
+						<div className="uc-help-banner">
+							<span className="uc-help-icon">?</span>
+							<div>
+								<strong className="uc-help-title">Need something else?</strong>
+								<p className="uc-help-sub">Explore 50+ home services</p>
+							</div>
+							<span className="uc-help-arrow" aria-hidden="true">↗</span>
+						</div>
+					</aside>
+				</div>
+			</section>
+
+			<footer className="uc-footer">
+				<span className="uc-footer-brand">QuickRebook</span>
+				<span>Trusted home services, made simple.</span>
+				<span>© 2026 Urban Company</span>
+			</footer>
 		</main>
 	);
 }
-
