@@ -1,37 +1,36 @@
 import { NextResponse } from "next/server";
 import { db } from "../../../../../../prisma/db";
+import { computeDailySlots } from "@/lib/availability";
+import { getSession } from "@/lib/auth";
+import { isValidCalendarDate, parsePositiveIntId } from "@/lib/validation";
+import { badRequest, unauthorized, notFound, internalError } from "@/lib/api-response";
 
 export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await context.params;
-    const professionalId = Number(id);
+    const session = await getSession(request);
+    if (!session) {
+      return unauthorized("Authentication required. Please log in.");
+    }
 
-    if (!Number.isInteger(professionalId)) {
-      return NextResponse.json(
-        { error: "Invalid professional ID" },
-        { status: 400 }
-      );
+    const { id } = await context.params;
+    const professionalId = parsePositiveIntId(id);
+
+    if (professionalId === null) {
+      return badRequest("Professional ID must be a valid positive integer", "id");
     }
 
     const { searchParams } = new URL(request.url);
     const date = searchParams.get("date");
 
     if (!date) {
-      return NextResponse.json(
-        { error: "Date is required" },
-        { status: 400 }
-      );
+      return badRequest("Date query parameter is required in YYYY-MM-DD format", "date");
     }
 
-    // Validate date format: YYYY-MM-DD
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return NextResponse.json(
-        { error: "Date must be in YYYY-MM-DD format" },
-        { status: 400 }
-      );
+    if (!isValidCalendarDate(date)) {
+      return badRequest("Date must be a valid calendar date in YYYY-MM-DD format", "date");
     }
 
     // Find professional
@@ -40,45 +39,34 @@ export async function GET(
     });
 
     if (!professional) {
-      return NextResponse.json(
-        { error: "Professional not found" },
-        { status: 404 }
-      );
+      return notFound("Professional not found.");
     }
 
-    // Get bookings for this professional
+    // Get all bookings for this professional
     const bookings = await db.orm.public.Booking
       .where({
         professionalId,
       })
       .all();
 
-    // Only return bookings for the requested date
-    const bookingsForDate = bookings.filter((booking) => {
-      const bookingDate = String(booking.bookingDate);
-
-      return bookingDate.startsWith(date);
-    });
+    // Compute slot availability (open vs booked vs held) for the requested date
+    const { allSlots, availableSlots, bookedSlots } = computeDailySlots(
+      date,
+      bookings
+    );
 
     return NextResponse.json({
       professional: {
         id: professional.id,
         name: professional.name,
+        phone: professional.phone,
       },
       date,
-      bookedSlots: bookingsForDate.map((booking) => ({
-        bookingId: booking.id,
-        service: booking.service,
-        bookingDate: booking.bookingDate,
-        status: booking.status,
-      })),
+      slots: allSlots,
+      availableSlots,
+      bookedSlots,
     });
   } catch (error) {
-    console.error("Calendar API error:", error);
-
-    return NextResponse.json(
-      { error: "Failed to fetch professional calendar" },
-      { status: 500 }
-    );
+    return internalError(error, "Failed to fetch professional calendar.");
   }
 }

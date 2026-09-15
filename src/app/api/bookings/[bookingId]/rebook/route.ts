@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { db } from "../../../../../../prisma/db";
+import { parseSlotTime, hasBookingConflict } from "@/lib/availability";
+import { getSession } from "@/lib/auth";
+import { validateRebookInput, parsePositiveIntId } from "@/lib/validation";
+import { badRequest, unauthorized, forbidden, notFound, slotConflict, internalError } from "@/lib/api-response";
+import { getPgPool } from "@/lib/pg-pool";
 
 export async function POST(
   request: Request,
@@ -7,23 +12,33 @@ export async function POST(
 ) {
   try {
     const { bookingId: bookingIdParam } = await context.params;
-    const bookingId = Number(bookingIdParam);
+    const bookingId = parsePositiveIntId(bookingIdParam);
 
-    if (!Number.isInteger(bookingId)) {
-      return NextResponse.json(
-        { error: "Invalid booking ID" },
-        { status: 400 }
-      );
+    if (bookingId === null) {
+      return badRequest("Booking ID must be a valid positive integer", "bookingId");
     }
 
-    const body = await request.json();
-    const { date, time } = body;
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return badRequest("Invalid JSON in request body");
+    }
 
-    if (!date || !time) {
-      return NextResponse.json(
-        { error: "Date and time are required" },
-        { status: 400 }
-      );
+    const validation = validateRebookInput(body);
+    if (!validation.success || !validation.data) {
+      return badRequest(validation.error || "Invalid booking slot selection", validation.field);
+    }
+
+    const { date, time } = validation.data;
+
+    const session = await getSession(request);
+    if (!session) {
+      return unauthorized("Authentication required. Please log in.");
+    }
+
+    if (session.role !== "CUSTOMER") {
+      return forbidden("Only customers can re-book services.");
     }
 
     // Find the old booking
@@ -32,63 +47,92 @@ export async function POST(
     });
 
     if (!oldBooking) {
-      return NextResponse.json(
-        { error: "Booking not found" },
-        { status: 404 }
-      );
+      return notFound("Booking not found.");
     }
 
-    // Only completed bookings can be re-booked
-    if (oldBooking.status !== "Completed") {
-      return NextResponse.json(
-        { error: "Only completed bookings can be re-booked" },
-        { status: 400 }
-      );
+    // Authorization check: User can only re-book their own bookings
+    if (oldBooking.customerId !== session.userId) {
+      return forbidden("You can only re-book your own bookings.");
     }
 
-    // New booking date/time
-    const newBookingDate = `${date}T${time}:00`;
+    // Only COMPLETED bookings can be re-booked
+    const oldStatus = (oldBooking.status || "").toUpperCase();
+    if (oldStatus !== "COMPLETED") {
+      return badRequest("Only completed bookings can be re-booked.");
+    }
 
-    // Check professional availability
-    const existingBookings = await db.orm.public.Booking
-      .where({
-        professionalId: oldBooking.professionalId,
-        bookingDate: newBookingDate,
-      })
-      .all();
+    // Parse requested time interval in IST (+05:30)
+    const { start: requestedStart, end: requestedEnd } = parseSlotTime(date, time);
 
-    if (existingBookings.length > 0) {
+    // Concurrency-safe atomic booking via PostgreSQL advisory transaction lock & unique constraint
+    const pool = getPgPool();
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      // Lock specifically on this professional + slot to prevent concurrent double-booking races
+      const lockKey = `booking_${oldBooking.professionalId}_${requestedStart.toISOString()}`;
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
+
+      // Query any active overlapping bookings for this professional
+      const conflictRes = await client.query(
+        `SELECT id FROM public.booking
+         WHERE "professionalId" = $1
+         AND status != 'CANCELLED'
+         AND ("bookingDate", "bookingDate" + interval '150 minutes') OVERLAPS ($2::timestamptz, $3::timestamptz)
+         LIMIT 1`,
+        [oldBooking.professionalId, requestedStart.toISOString(), requestedEnd.toISOString()]
+      );
+
+      if (conflictRes.rowCount && conflictRes.rowCount > 0) {
+        await client.query("ROLLBACK");
+        return slotConflict("Professional is not available for the requested time slot.");
+      }
+
+      // Insert new confirmed booking
+      const insertRes = await client.query(
+        `INSERT INTO public.booking (service, "bookingDate", status, "customerId", "professionalId", "createdAt", "updatedAt")
+         VALUES ($1, $2, 'CONFIRMED', $3, $4, NOW(), NOW())
+         RETURNING id, service, "bookingDate", status, "customerId", "professionalId", "createdAt", "updatedAt"`,
+        [
+          oldBooking.service,
+          requestedStart.toISOString(),
+          oldBooking.customerId,
+          oldBooking.professionalId,
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      const createdBooking = insertRes.rows[0];
+
       return NextResponse.json(
         {
-          error: "Professional is not available at this time",
+          success: true,
+          message: "Booking re-booked successfully",
+          booking: {
+            id: createdBooking.id,
+            service: createdBooking.service,
+            bookingDate: createdBooking.bookingDate,
+            status: createdBooking.status,
+            customerId: createdBooking.customerId,
+            professionalId: createdBooking.professionalId,
+          },
         },
-        { status: 409 }
+        { status: 201 }
       );
+    } catch (dbErr: any) {
+      await client.query("ROLLBACK").catch(() => {});
+      // PostgreSQL unique_violation error code
+      if (dbErr.code === "23505") {
+        return slotConflict("Professional is not available for the requested time slot.");
+      }
+      throw dbErr;
+    } finally {
+      client.release();
     }
-
-    // Create a completely NEW booking
-    const newBooking = await db.orm.public.Booking.create({
-      service: oldBooking.service,
-      bookingDate: newBookingDate,
-      status: "CONFIRMED",
-      customerId: oldBooking.customerId,
-      professionalId: oldBooking.professionalId,
-    });
-
-    return NextResponse.json(
-      {
-        success: true,
-        message: "Booking re-booked successfully",
-        booking: newBooking,
-      },
-      { status: 201 }
-    );
   } catch (error) {
-    console.error("Re-book API error:", error);
-
-    return NextResponse.json(
-      { error: "Failed to re-book appointment" },
-      { status: 500 }
-    );
+    return internalError(error, "Failed to re-book appointment.");
   }
 }

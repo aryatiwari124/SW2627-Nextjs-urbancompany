@@ -1,26 +1,32 @@
 // use prisma-next
 
+enum UserRole {
+  @@type("pg/text@1")
+  CUSTOMER     = "CUSTOMER"
+  PROFESSIONAL = "PROFESSIONAL"
+}
+
+enum BookingStatus {
+  @@type("pg/text@1")
+  COMPLETED = "COMPLETED"
+  CONFIRMED = "CONFIRMED"
+  HELD      = "HELD"
+  CANCELLED = "CANCELLED"
+}
+
 model User {
-  id        Int      @id @default(autoincrement())
-  email     String   @unique
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  password  String
+  role      UserRole  @default(CUSTOMER)
   username  String?
   name      String?
   phone     String?
   address   String?
 
-  posts     Post[]
-  bookings  Booking[]
+  bookings      Booking[]
+  professionals Professional[]
 
-  createdAt TimestamptzString @default(now())
-  updatedAt temporal.updatedAtString()
-}
-
-model Post {
-  id        Int      @id @default(autoincrement())
-  title     String
-  content   String?
-  author    User     @relation(fields: [authorId], references: [id])
-  authorId  Int
   createdAt TimestamptzString @default(now())
   updatedAt temporal.updatedAtString()
 }
@@ -29,6 +35,8 @@ model Professional {
   id        Int       @id @default(autoincrement())
   name      String
   phone     String?
+  user      User?     @relation(fields: [userId], references: [id])
+  userId    Int?
   bookings  Booking[]
 
   createdAt TimestamptzString @default(now())
@@ -36,17 +44,18 @@ model Professional {
 }
 
 model Booking {
-  id             Int          @id @default(autoincrement())
+  id             Int           @id @default(autoincrement())
   service        String
   bookingDate    TimestamptzString
-  status         String
+  status         BookingStatus
 
-  customer       User         @relation(fields: [customerId], references: [id])
+  customer       User          @relation(fields: [customerId], references: [id])
   customerId     Int
 
-  professional   Professional @relation(fields: [professionalId], references: [id])
+  professional   Professional  @relation(fields: [professionalId], references: [id])
   professionalId Int
 
   createdAt      TimestamptzString @default(now())
   updatedAt      temporal.updatedAtString()
 }
+
