@@ -6,9 +6,5 @@ const created = await db.orm.public.User.create({
   email,
   username: 'demo-user',
   name: 'Demo User',
+  password: 'demo-password',
 });
-
-const users = await db.orm.public.User.select('id', 'email', 'name').all();
-
-console.log({ created, users });
-await db.close();
