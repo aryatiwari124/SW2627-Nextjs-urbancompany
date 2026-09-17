@@ -117,26 +117,28 @@ export default function SignupPage() {
           </div>
 
           <div className="auth-field">
-            <label htmlFor="password" className="auth-label">Password (min 6 characters)</label>
+            <label htmlFor="password" className="auth-label">Password (min 8 characters, letters & numbers)</label>
             <input
               id="password"
+              name="password"
               type="password"
               autoComplete="new-password"
               required
-              minLength={6}
+              minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="auth-input"
-              placeholder="••••••••"
+              placeholder="Min. 8 characters with numbers"
             />
           </div>
 
           <div className="auth-field">
             <label htmlFor="phone" className="auth-label">
-              Phone Number {role === "PROFESSIONAL" ? "" : "(optional)"}
+              Phone Number {role === "PROFESSIONAL" ? "(required)" : "(optional)"}
             </label>
             <input
               id="phone"
+              name="phone"
               type="tel"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
@@ -148,10 +150,12 @@ export default function SignupPage() {
 
           {role === "CUSTOMER" && (
             <div className="auth-field">
-              <label htmlFor="address" className="auth-label">Address (optional)</label>
+              <label htmlFor="address" className="auth-label">Service Address (required)</label>
               <input
                 id="address"
+                name="address"
                 type="text"
+                required
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
                 className="auth-input"

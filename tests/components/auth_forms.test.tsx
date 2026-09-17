@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, vi } from "vitest";
@@ -54,14 +54,14 @@ describe("Frontend Component Tests: Auth Forms", () => {
       expect(screen.getByRole("button", { name: "Professional" })).toBeTruthy();
 
       // By default Customer is selected -> Address field is visible
-      expect(screen.getByLabelText("Address (optional)")).toBeTruthy();
+      expect(screen.getByLabelText(/Service Address/i)).toBeTruthy();
 
       // Switch to Professional
       const proTab = screen.getByRole("button", { name: "Professional" });
       fireEvent.click(proTab);
 
       // Address field should not be rendered for Professional
-      expect(screen.queryByLabelText("Address (optional)")).toBeNull();
+      expect(screen.queryByLabelText(/Service Address/i)).toBeNull();
 
       // Phone is required for Professional
       expect(screen.getByLabelText(/phone number/i)).toBeTruthy();
